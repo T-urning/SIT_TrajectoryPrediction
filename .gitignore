@@ -1,0 +1,4 @@
+.vscode/launch.json
+*.pyc
+outputs/
+data/
