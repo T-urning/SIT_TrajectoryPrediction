@@ -37,18 +37,23 @@ def get_frame_instance_dict_new(tracks):
     """
     # for unique frame id among multiple datasets.
     # Note: dataset_id starts from 1, ends at 6
+
     dataset_list = []
     sorted_frame_id_list = []
     for dataset_idx, dataset in enumerate(tracks):
         dataset_id = dataset_idx + 1
-        frame_dict = defaultdict(lambda: dict())
+        frame_dict = dict()
         for vehicle_idx, vehicle_data in enumerate(dataset):
             if len(vehicle_data) <= 1:
                 continue
-            assert vehicle_data.shape[0] == 4
+            # assert vehicle_data.shape[0] == 4
             vehicle_id = vehicle_idx + 1
-            for frame_id, local_x, local_y, lane_id in vehicle_data.transpose():
-                frame_dict[int(frame_id)][int(vehicle_id)] = np.array([dataset_id, vehicle_id, frame_id, local_x, local_y, lane_id], dtype=np.float32)
+            
+            for frame_id, local_x, local_y in vehicle_data.transpose():
+                lane_id = 1
+                vehicle_dict = frame_dict.get(frame_id, {})
+                vehicle_dict[int(vehicle_id)] = np.array([dataset_id, vehicle_id, frame_id, local_x, local_y, lane_id], dtype=np.float32)
+                frame_dict[int(frame_id)] = vehicle_dict
         dataset_list.append(frame_dict)
         sorted_frame_id_list.append(sorted(frame_dict.keys()))
     return dataset_list, sorted_frame_id_list
@@ -133,7 +138,7 @@ class NgsimFeederII(Dataset):
 
     def _process_data(self, now_dict, cur_frame_idx, sorted_frame_id_set):
 
-        start_ind, end_ind = cur_frame_idx - self.history_frames, cur_frame_idx + self.future_frames + 1
+        start_ind, end_ind = cur_frame_idx - self.history_frames, min(cur_frame_idx + self.future_frames + 1, len(sorted_frame_id_set))
         # observed_last = list(range(start_ind, end_ind, self.down_sampling_steps))[self.history_frames // self.down_sampling_steps - 1]
         observed_last = cur_frame_idx
         observed_last_frame = sorted_frame_id_set[observed_last]
@@ -196,9 +201,9 @@ class NgsimFeederII(Dataset):
 
         # object_frame_feature with a shape of (#frame, #object, 7) -> (#object, #frame, 7)
         # num_frames_after_down_sampling = end_ind - start_ind - ((observed_last + 1 - start_ind) // 2)
-        object_frame_feature = np.zeros((self.max_num_object, len(frame_idxs_after_down_sampling), total_feature_dimension))
+        object_frame_feature = np.zeros((self.max_num_object, self.total_frames // self.down_sampling_steps, total_feature_dimension))
         
-        object_frame_feature[:num_visible_object + num_non_visible_object, :len(object_frame_feature)] = np.transpose(object_feature_list, (1,0,2))
+        object_frame_feature[:num_visible_object + num_non_visible_object, :len(frame_idxs_after_down_sampling)] = np.transpose(object_feature_list, (1,0,2))
         
         return object_frame_feature, neighbor_matrix, m_xy
 
@@ -506,22 +511,23 @@ if __name__ == '__main__':
 
     mat_fpath = 'data/ValSet.mat'
     dataset = NgsimFeederII(mat_fpath, train_val_test='val', max_num_object=255, **{'graph_args': {'max_hop': 2, 'num_node': 255, 'num_hetero_types': 3}})
-    dataset.__getitem__(3)
-    # dataset.length = 100
+   
+    print(dataset.length)
+    dataset.length = 10000
+    batch_size = 16
     loader = torch.utils.data.DataLoader(
         dataset=dataset,
-        batch_size=16,
+        batch_size=batch_size,
         shuffle=False,
         drop_last=False,
         num_workers=0
     )
    
-    
     rescale_xy = torch.ones((1,2,1,1))
     rescale_xy[:, 0] = 1.0
     rescale_xy[:, 1] = 1.0
     max_velocity_x, max_velocity_y = 0.0, 0.0
-    for iteration, (ori_data, A, _) in tqdm(enumerate(loader)):
+    for iteration, (ori_data, A, _, _) in tqdm(enumerate(loader), total=dataset.length // batch_size + 1):
         
         data, no_norm_loc_data = preprocess_data(ori_data, rescale_xy)
         cur_max_x = data[:, 0, :, :].abs().max().item()

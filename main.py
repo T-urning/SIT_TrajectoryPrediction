@@ -41,9 +41,9 @@ parser.add_argument('--lr_decay_epoch', default=1, type=int, help='')
 parser.add_argument('--t_h', default=30, type=int, help='length of track history, seconds * sampling rate')
 parser.add_argument('--t_f', default=50, type=int, help='length of predicted trajectory, seconds * sampling rate')
 parser.add_argument('--down_sampling_steps', default=2, type=int)
-parser.add_argument('--data_aug_ratio', default=0.0, type=float, help="data augmentation")
+parser.add_argument('--data_aug_ratio', default=0.5, type=float, help="data augmentation")
 parser.add_argument('--neighbor_distance', default=90, type=float, help="it's unit is the feet")
-parser.add_argument('--max_num_object', default=255, type=int)
+parser.add_argument('--max_num_object', default=260, type=int)
 args = parser.parse_args()
 
 def seed_torch(seed=24):
@@ -98,10 +98,10 @@ def data_loader(data_fpath, batch_size=128, shuffle=True, drop_last=False, train
         batch_size=batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
-        num_workers=0,
+        num_workers=4,
         pin_memory=True
     )
-    return loader
+    return loader, dataset.length // batch_size + 1
 
 def preprocess_data(data, rescale_xy):
     # data: (N, C, T, V)
@@ -156,14 +156,14 @@ def compute_RMSE(pred, GT, mask, error_order=2):
     return overall_sum_time, overall_num, x2y2
 
 
-def train_model(model, data_loader, optimizer, lr_scheduler, epoch_log, teacher_forcing_rate=0.0):
+def train_model(model, data_loader, val_loader, optimizer, lr_scheduler, epoch_log, teacher_forcing_rate=0.0):
     model.train()
 
     rescale_xy = torch.ones((1,2,1,1)).to(args.device)
     rescale_xy[:, 0] = args.max_x
     rescale_xy[:, 1] = args.max_y
     class_criterion = CrossEntropyLoss(ignore_index=0) # we let 0 represent the unknown lane id
-    for iteration, (ori_data, A, _, _) in enumerate(data_loader):
+    for iteration, (ori_data, A, _, _) in tqdm(enumerate(data_loader)):
         # ori_data: (N, C, T, V), target_vehicle_ids: (N,)
         # C = 7 : [dataset_id, vehicle_id, frame_id local_x, local_y, lane_id] + [mark]
         data, _, _ = preprocess_data(ori_data, rescale_xy)
@@ -200,6 +200,7 @@ def train_model(model, data_loader, optimizer, lr_scheduler, epoch_log, teacher_
         optimizer.step()
         lr_scheduler.step(total_loss.item())
         optimizer.zero_grad()
+
 
 def val_model(model, data_loader):
     model.eval()
@@ -246,7 +247,7 @@ def test_model(model, data_loader, mode='all'):
     all_overall_sum_list = []
     all_overall_num_list = []
     with torch.no_grad():
-        for iteration, (ori_data, A, _, target_vehicle_ids) in tqdm(enumerate(data_loader)):
+        for iteration, (ori_data, A, _, target_vehicle_ids) in enumerate(data_loader):
             data, no_norm_loc_data, ori_vehicle_ids = preprocess_data(ori_data, rescale_xy)
             now_history_frames = args.t_h // args.down_sampling_steps # 30 // 2, 30: history frames, 2: down sampling steps
             input_data = data[:, :, :now_history_frames, :]
@@ -285,7 +286,7 @@ def test_model(model, data_loader, mode='all'):
 
 def run_train_val(model, train_data_path, dev_data_path):
     model.to(args.device)
-    train_loader = data_loader(
+    train_loader, num_batch_train = data_loader(
         train_data_path,
         batch_size=args.train_batch_size,
         shuffle=True,
@@ -293,7 +294,7 @@ def run_train_val(model, train_data_path, dev_data_path):
         train_val_test='train'
     )
 
-    val_loader = data_loader(
+    val_loader, num_batch_val = data_loader(
         dev_data_path,
         batch_size=args.val_batch_size,
         shuffle=False,
@@ -314,37 +315,84 @@ def run_train_val(model, train_data_path, dev_data_path):
 
     mini_rmse = np.inf
     is_best = False
+    num_iter_to_val = max(num_batch_train / 10, 100)
     for i_epoch in range(args.num_epochs):
 
         logger.info('################# Train ##########################')
         teacher_forcing = np.exp(-i_epoch / 3) 
         logger.info(f'current teacher forcing rate is {teacher_forcing}')
-        s_t = time.time()
-        train_model(model, train_loader, optimizer=optimizer, lr_scheduler=lr_scheduler, epoch_log='Epoch:{:>4}/{:>4}'.format(i_epoch, args.num_epochs), teacher_forcing_rate=teacher_forcing)
 
-        
-        
-        logger.info('################# Val ##########################')
-        rmse = display_RMSE_test(
-            val_model(model, val_loader),
-            '{}_Epoch{}'.format('Val', i_epoch)
-        )
-        e_t = time.time()
-        logger.info(f'one training epoch and a validation process need {(e_t - s_t) / 60} minutes.')
-        rmse = np.sum(rmse)
-        if rmse < mini_rmse:
-            is_best = True
-            mini_rmse = rmse
+        # train_model(model, train_loader, val_loader, optimizer=optimizer, lr_scheduler=lr_scheduler, epoch_log='Epoch:{:>4}/{:>4}'.format(i_epoch, args.num_epochs), teacher_forcing_rate=teacher_forcing)
+        model.train()
 
-        checkpoint = {
-            'epoch': i_epoch,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict()
-        }
+        rescale_xy = torch.ones((1,2,1,1)).to(args.device)
+        rescale_xy[:, 0] = args.max_x
+        rescale_xy[:, 1] = args.max_y
+        class_criterion = CrossEntropyLoss(ignore_index=0) # we let 0 represent the unknown lane id
+        for iteration, (ori_data, A, _, _) in tqdm(enumerate(train_loader)):
+            # ori_data: (N, C, T, V), target_vehicle_ids: (N,)
+            # C = 7 : [dataset_id, vehicle_id, frame_id local_x, local_y, lane_id] + [mark]
+            data, _, _ = preprocess_data(ori_data, rescale_xy)
+            #TODO change the range, decrease the training overload
+            #for now_history_frames in range(1, data.shape[-2]): 
+            optimizer.zero_grad()
+            now_history_frames = args.t_h // args.down_sampling_steps + 1
+            
+            input_data = data[:, :, :now_history_frames, :]
+            output_loc_GT = data[:, :2, now_history_frames:, :]
+            output_mask = data[:, -1:, now_history_frames:, :] # (N, 1, T, V)
+            lane_id_GT = data[:, 2:-1, now_history_frames:, :].detach().clone().long() # (N, 1, T, V)
+            lane_id_GT = model.reshape_for_lstm(lane_id_GT) # (N*V, T, C), C = 1
+
+            A = A.float().to(args.device)
+            predicted, lane_id_predicted = model(pra_x=input_data, pra_A=A, pra_pred_length=output_loc_GT.shape[-2], pra_teacher_forcing_ratio=teacher_forcing, pra_teacher_location=output_loc_GT)
+            # Compute loss for training
+            #TODO We use abs to compute loss to backward updata weights
+            overall_sum_time, overall_num, _ = compute_RMSE(predicted, output_loc_GT, output_mask, error_order=1)
+            # overall_loss
+            total_loss = torch.sum(overall_sum_time) / torch.max(torch.sum(overall_num), torch.ones(1,).to(args.device)) #(1,)
+            if args.multi_task_with_lane:
+                num_lane_id = lane_id_predicted.size(-1)
+                lane_predict_loss = class_criterion(lane_id_predicted.view(-1, num_lane_id), lane_id_GT.view(-1))
+                total_loss += lane_predict_loss
+            
+            
+            if iteration % 30 == 0:
+                now_lr = [param_group['lr'] for param_group in optimizer.param_groups][0]
+                epoch_log='Epoch:{:>4}/{:>4}'.format(i_epoch, args.num_epochs)
+                logger.info('|{}|{:>20}|\tIteration:{:>5}|\tLoss:{:.6f}|\tlr: {:.5f}|\ttf: {:.3f}|'.format(datetime.now(), epoch_log, iteration, total_loss.data.item(), now_lr, teacher_forcing))            
+            
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            optimizer.step()
+            lr_scheduler.step(total_loss.item())
+            optimizer.zero_grad()
         
-        model_fname = f"{args.identity}_{i_epoch}.pt"
-        save_ckpt(checkpoint, args.model_save_dir, args.best_model_save_dir, is_best=is_best, file_name=model_fname)
-        is_best = False
+            if iteration % num_iter_to_val == 0:
+
+                logger.info('################# Val ##########################')
+                # s_t = time.time()
+                rmse = display_RMSE_test(
+                    val_model(model, val_loader),
+                    '{}_Epoch{}_Iteration{}'.format('Val', i_epoch, iteration)
+                )
+                # e_t = time.time()
+                # logger.info(f'one training epoch and a validation process need {(e_t - s_t) / 60} minutes.')
+                rmse = np.sum(rmse)
+                if rmse < mini_rmse:
+                    is_best = True
+                    mini_rmse = rmse
+
+                checkpoint = {
+                    'epoch': i_epoch,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict()
+                }
+                
+                model_fname = f"{args.identity}_{i_epoch}_{iteration}.pt"
+                save_ckpt(checkpoint, args.model_save_dir, args.best_model_save_dir, is_best=is_best, file_name=model_fname)
+                is_best = False
+                model.train()
 
 
 def run_test(model, test_data_path, model_path=None, mode='all'):
@@ -352,7 +400,7 @@ def run_test(model, test_data_path, model_path=None, mode='all'):
         model, _, _ = load_ckpt(model_path, model)
     model.to(args.device)
     logger.info(f'################# Test with mode: {mode} ##########################')
-    test_loader = data_loader(
+    test_loader, _ = data_loader(
         test_data_path,
         batch_size=args.test_batch_size,
         shuffle=False,
@@ -404,7 +452,7 @@ if __name__ == '__main__':
     model = model_dict[args.model_name](in_channels=4, graph_args=args.graph_args, edge_importance_weighting=True, predict_lane=args.multi_task_with_lane, seq2seq_type=args.seq2seq_type)
     args.max_x = 0.1 # 5.2
     args.max_y = 1.0 # 32
-    args.do_test = True
+    args.do_train = True
     if args.do_train:
         run_train_val(model, train_data_path=train_path, dev_data_path=dev_path)
     if args.do_test:
