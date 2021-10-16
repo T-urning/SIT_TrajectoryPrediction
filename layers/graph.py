@@ -1,4 +1,6 @@
+import torch
 import numpy as np
+from torch._C import dtype
 
 class HeteroGraph():
 	""" The Heterogenous Graph Representation
@@ -11,7 +13,29 @@ class HeteroGraph():
 	def __init__(self, num_node=120, num_hetero_types=3, **kwargs):
 		self.num_node = num_node
 		self.num_hetero_types = num_hetero_types
-	
+
+	def get_adjacency_batch(self, relation_matrix):
+		"""
+		relation_matrix is shape of (batch_size, num_obj, num_obj)
+		relation_matrix[i,j,k] is the relation type between the j-th node and k-th node in the i-th example.
+		"""
+		adjacency = (relation_matrix > 0).float()
+		self.relation_matrix = relation_matrix
+		return adjacency
+
+	def normalize_adjacency_batch(self, A):
+		Dl = A.sum(axis=1)
+		Dl[Dl == 0] = float('inf')
+		# Dn = torch.zeros_like(A, dtype=torch.float32)
+		# batch_indices, obj_indices = torch.where(Dl > 0)
+		# Dn[batch_indices, obj_indices, obj_indices] = Dl.view(-1) ** (-1)
+		AD = A / Dl.unsqueeze(1) # (batch_size, object_num, object_num) / (batch_size, 1, object_num) -> (batch_size, object_num, object_num)
+		A_normalized = torch.zeros((A.size(0), self.num_hetero_types, self.num_node, self.num_node))
+		for i, type_ in enumerate(range(1, self.num_hetero_types + 1)):
+			A_normalized[:, i][self.relation_matrix == type_] = AD[self.relation_matrix == type_]
+
+		return A_normalized
+
 	def get_adjacency(self, relation_matrix):
 		"""
 		relation_matrix[i,j] is the relation type between the i-th node and j-th node.
@@ -51,6 +75,31 @@ class Graph():
 				 **kwargs):
 		self.max_hop = max_hop
 		self.num_node = num_node 
+
+	def get_adjacency_batch(self, A):
+		"""
+		A is shape of (batch_size, num_node, num_node)
+		"""
+		transfer_mat = [torch.matrix_power(A, d) for d in range(self.max_hop + 1)]
+		arrive_mat = torch.stack(transfer_mat, dim=1) > 0 # (batch_size, max_hop+1, num_node, num_node)
+		self.hop_dis = torch.zeros((A.size(0), self.num_node, self.num_node)) + np.inf
+		for d in range(self.max_hop, -1, -1):
+			self.hop_dis[arrive_mat[:, d]] = d # when d = 0, all self-connections will be set to 0
+		adjacency = (self.hop_dis <= self.max_hop).float()
+		return adjacency
+
+	def normalize_adjacency_batch(self, A):
+		Dl = A.sum(axis=1)
+		Dl[Dl == 0] = float('inf')
+		# Dn = torch.zeros_like(A, dtype=torch.float32)
+		# batch_indices, obj_indices = torch.where(Dl > 0)
+		# Dn[batch_indices, obj_indices, obj_indices] = Dl.view(-1) ** (-1)
+		AD = A / Dl.unsqueeze(1) # (batch_size, object_num, object_num) / (batch_size, 1, object_num) -> (batch_size, object_num, object_num)
+		A_normalized = torch.zeros((A.size(0), self.max_hop+1, self.num_node, self.num_node))
+		for i, type_ in enumerate(range(0, self.max_hop + 1)):
+			A_normalized[:, i][self.hop_dis == type_] = AD[self.hop_dis == type_]
+
+		return A_normalized
 
 	def get_adjacency(self, A):
 		# compute hop steps

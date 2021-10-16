@@ -14,8 +14,8 @@ class TPHGI(nn.Module):
 
 		# load graph
 		self.graph = Graph(**graph_args)
-		A_shape = (graph_args['max_hop']+1, graph_args['num_node'], graph_args['num_node'])
-
+		A_shape = (graph_args['num_hetero_types'], graph_args['num_node'], graph_args['num_node'])
+		self.interact_in_decoding = kwargs.get('interact_in_decoding', False)
 		# build networks
 		num_hetero_types = A_shape[0]
 		temporal_kernel_size = 5 #9 #5 # 3
@@ -44,8 +44,13 @@ class TPHGI(nn.Module):
 		self.num_node = num_node = self.graph.num_node
 		self.out_dim_per_node = out_dim_per_node = 2 #(x, y) coordinate
 		self.seq2seq_type = kwargs.get('seq2seq_type', 'gru')
+		self.max_num_object = kwargs.get('max_num_object', 120)
 		if self.seq2seq_type in ['gru', 'lstm']:
-			self.seq2seq = Seq2Seq(self.seq2seq_type, input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
+			self.seq2seq = Seq2Seq(
+				self.seq2seq_type, input_size=(64), hidden_size=out_dim_per_node, 
+				num_layers=2, interact_in_decoding=self.interact_in_decoding, 
+				max_num_object=self.max_num_object, dropout=0.5
+			)
 		else:
 			self.seq2seq = TransformerSeq2Seq()
 		# self.seq2seq_human = Seq2Seq(input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
@@ -149,7 +154,7 @@ class GRIP(nn.Module):
 		self.out_dim_per_node = out_dim_per_node = 2 #(x, y) coordinate
 		self.seq2seq_type = kwargs.get('seq2seq_type', 'gru')
 		if self.seq2seq_type in ['gru', 'lstm']:
-			self.seq2seq = Seq2Seq(self.seq2seq_type, input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
+			self.seq2seq = Seq2Seq(self.seq2seq_type, input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5)
 		else:
 			self.seq2seq = TransformerSeq2Seq()
 		

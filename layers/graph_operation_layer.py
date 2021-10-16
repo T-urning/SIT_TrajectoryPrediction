@@ -24,7 +24,7 @@ class HeteroGraphConv(nn.Module):
             bias=bias)
 
     def forward(self, x, A, transform_matrix, **kwargs):
-        assert A.size(1) == self.kernel_size
+        assert A.size(1) == self.kernel_size # x: (batch_size, 64, T, V) = (batch, 64, 15, 260)
         x = self.conv(x)
         n, kc, t, v = x.size()
         assert kc // self.kernel_size == transform_matrix.size(1) == transform_matrix.size(2)
