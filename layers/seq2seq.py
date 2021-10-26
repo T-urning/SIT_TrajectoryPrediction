@@ -50,7 +50,8 @@ class DecoderRNN(nn.Module):
 		decoded_output = self.dropout(decoded_output)
 		# decoded_output = self.tanh(self.linear(decoded_output))
 		decoded_output = self.linear(decoded_output)
-		# decoded_output = self.sigmoid(self.linear(decoded_output))
+		#TODO decoded_output = self.sigmoid(self.linear(decoded_output))
+		decoded_output = self.tanh(decoded_output)
 		return decoded_output, hidden
 
 class Seq2Seq(nn.Module):
@@ -87,14 +88,15 @@ class Seq2Seq(nn.Module):
 		for t in range(pred_length):
 			# encoded_input = torch.cat((now_label, encoded_input), dim=-1) # merge class label into input feature
 			now_out, hidden = self.decoder(decoder_input, hidden) # now_out is shape of (N * V, 1, 2), hidden is (2, N * V, 60)
-			# we force the model to predict the change of velocity by adding a residual connection
-			now_out += last_location
+			#TODO we force the model to predict the change of velocity by adding a residual connection
+			# now_out += last_location
 			outputs[:, t:t+1] = now_out
 			hidden_ = hidden[0] if isinstance(hidden, tuple) else hidden # because GRU and LSTM have different outputs
 			hidden_outputs[:, t:t+1] = hidden_.permute(1, 0, 2).contiguous().view(batch_size, 1, -1) # batch_size = N * V, (N * V, 1, 120)
 			teacher_force = np.random.random() < teacher_forcing_ratio
 			last_location = (teacher_location[:,t:t+1] if (type(teacher_location) is not type(None)) and teacher_force else now_out)
 			decoder_input = last_location
+
 			if self.interact_in_decoding:
 				pos_hidden = self.linear_pos_to_hidden(last_location)
 				interact = self.message_passing(hidden_.mean(dim=0))
@@ -113,7 +115,7 @@ class Seq2Seq(nn.Module):
 		input = origin_input.view(-1, self.max_num_object, origin_input.size(-1))
 		#input = origin_input.permute(1, 0, 2).contiguous().view(NV, output_size*hidden_size).view(-1, self.num_object, output_size*hidden_size)
 		output = self.self_attention(input, mask) # (N, V, 60)
-		output = self.dropout(output)
+		output = self.activate(self.dropout(output))
 
 		return output.view(-1, origin_input.size(-1)) # (N * V, 60)
 

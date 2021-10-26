@@ -3,3 +3,5 @@
 outputs/
 data/
 *.zip
+*.pdf
+*.svg

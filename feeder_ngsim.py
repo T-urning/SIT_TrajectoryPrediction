@@ -157,6 +157,7 @@ class NgsimFeederIII(Dataset):
                 assert i != 0  # the target vehicle's history track can not be None
                 continue
             history, future = track
+            assert i > 0 or (i == 0 and len(future) > 0 and len(history) > 0)
             history_start = self.max_len_history - len(history)
             object_frame_feature[valid_num, history_start: self.max_len_history, 2: 6] = history # [[frame_id, local_x, local_y, lane_id], ...]
             # we add a "mark" feature to the object_frame_feature to indicate whether this frame will not be included into loss calculation.
@@ -165,9 +166,9 @@ class NgsimFeederIII(Dataset):
 
             future_end = self.max_len_history + len(future)
             object_frame_feature[valid_num, self.max_len_history: future_end, 2: 6] = future
-            # as above
+            #TODO as above, but if the length of track history is less than self.t_h // 2, we will ignore this future track in the loss calculation but it will be considered in the interaction with other vehicles.
             # object_frame_feature[valid_num, future_end:, -1] = 0
-            object_frame_feature[valid_num, self.max_len_history: future_end, -1] = 1
+            object_frame_feature[valid_num, self.max_len_history: future_end, -1] = 1 if len(history) > 0 or valid_num == 0 else 0 # (self.history_frames // self.down_sampling_steps // 2)
             # in the end, we specify dataset_id and vehicle_id in object_frame_feature.
             object_frame_feature[valid_num, :, 0: 2] = [dset_id, v_id]
             valid_num += 1
@@ -688,13 +689,14 @@ def get_frame_instance_dict(traj):
 
 if __name__ == '__main__':
     
-    def preprocess_data(data, rescale_xy, delete_outliers=False, is_training=True):
+    def preprocess_data(data, rescale_xy, delete_outliers=False, is_training=True, observed_last=15):
         # data: (N, C, T, V)
         feature_id = [3, 4, 5, 6] # local x, local y, lane_id, mark
         ori_data = data[:, feature_id].detach()
         data = ori_data.detach().clone()
 
         new_mask = (data[:, :2, 1:] != 0) * (data[:, :2, :-1] != 0) 
+        new_mask[:, :2, observed_last-1: observed_last+1, 0] = 1 #
         # It is easier to predict the velocity of an object than predicting its location.
         # Calculate velocities p^{t+1} - p^{t} before feeding the data into the model.
         data[:, :2, 1:] = (data[:, :2, 1:] - data[:, :2, :-1]).float() * new_mask.float()
@@ -712,8 +714,7 @@ if __name__ == '__main__':
         return data, ori_data
 
     mat_fpath = 'data/TrainSet.mat'
-    dataset = NgsimFeederIII(mat_fpath, train_val_test='val', max_num_object=39, **{'graph_args': {'max_hop': 2, 'num_node': 39, 'num_hetero_types': 3}})
-    dataset.__getitem__(950)
+    dataset = NgsimFeederIII(mat_fpath, train_val_test='val', max_num_object=22, **{'graph_args': {'max_hop': 2, 'num_node': 22, 'num_hetero_types': 3}})
     print(dataset.length)
     # dataset.length = 10000
     batch_size = 16
@@ -730,18 +731,30 @@ if __name__ == '__main__':
     rescale_xy[:, 1] = 1.0
     max_velocity_x, max_velocity_y = 0.0, 0.0
     max_valid_vehicles = 0
-    for iteration, (ori_data, A, _, valid_nums) in tqdm(enumerate(loader), total=dataset.length // batch_size + 1):
+    for iteration, (ori_data, A, _, target_vehicle_ids) in tqdm(enumerate(loader), total=dataset.length // batch_size + 1):
         
-        data, no_norm_loc_data = preprocess_data(ori_data, rescale_xy)
-        cur_max_x = data[:, 0, :, :].abs().max().item()
-        cur_max_y = data[:, 1, :, :].abs().max().item()
-        cur_valid_num = valid_nums.max().item()
-        max_valid_vehicles = cur_valid_num if cur_valid_num > max_valid_vehicles else max_valid_vehicles 
+        tracks = ori_data[:, 3:6, :, :] # (batch_size, 3, 41, 39)
+        observed_num = ori_data[:, -1, 15, :].sum(axis=-1) # (batch_size, )
+        num = observed_num.max().item()
+        max_valid_vehicles = num if num > max_valid_vehicles else max_valid_vehicles 
+        # observed = observed_num[observed_num > 10].long()
+        # tracks_with_many_neighbor = tracks[observed_num > 10]
+        # if observed.size(0) > 0:
+        #     max_num_idx = torch.argmax(observed).item()
+        #     tracks = tracks_with_many_neighbor[max_num_idx, :, :, :observed[max_num_idx]].permute(2, 1, 0)
+        #     if tracks_with_many_neighbor.size(0) > 1:
+        #         pass
 
-        max_velocity_x = cur_max_x if cur_max_x > max_velocity_x else max_velocity_x
-        max_velocity_y = cur_max_y if cur_max_y > max_velocity_y else max_velocity_y
-        if cur_max_x > 20 or cur_max_y > 50:
-            print(cur_max_x, cur_max_y)
+        # data, no_norm_loc_data = preprocess_data(ori_data, rescale_xy)
+        # cur_max_x = data[:, 0, :, :].abs().max().item()
+        # cur_max_y = data[:, 1, :, :].abs().max().item()
+        
+        # max_valid_vehicles = cur_valid_num if cur_valid_num > max_valid_vehicles else max_valid_vehicles 
+
+        # max_velocity_x = cur_max_x if cur_max_x > max_velocity_x else max_velocity_x
+        # max_velocity_y = cur_max_y if cur_max_y > max_velocity_y else max_velocity_y
+        # if cur_max_x > 20 or cur_max_y > 50:
+        #     print(cur_max_x, cur_max_y)
         
 
     print(max_velocity_x, max_velocity_y, max_valid_vehicles)
