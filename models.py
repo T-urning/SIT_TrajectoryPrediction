@@ -3,9 +3,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from einops import rearrange, repeat
+from einops import rearrange
 from layers.graph import Graph
-from layers.attention import TiedLinear, MultiHeadAttention, PositionwiseFeedForward, MultiHeadAttentionNew, EncoderLayer, DecoderLayer
+from layers.attention import PositionwiseFeedForward, MultiHeadAttentionNew, EncoderLayer
 from layers.graph_conv_block import Graph_Conv_Block
 from layers.seq2seq import EncoderRNN, Seq2Seq, TransformerSeq2Seq, DecoderRNN
 
@@ -56,8 +56,7 @@ class TPHGI(nn.Module):
             )
         else:
             self.seq2seq = TransformerSeq2Seq()
-        # self.seq2seq_human = Seq2Seq(input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
-        # self.seq2seq_bike = Seq2Seq(input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
+        
         # lane id predictor
         self.predict_lane = predict_lane
         if self.predict_lane:
@@ -255,9 +254,6 @@ class SpatialTransformerRNN(nn.Module):
             src_mask = torch.einsum('bsi,bxi->bsx', src_mask, src_mask)
             src_mask = (subsequent_mask * src_mask).bool()
             
-            # spatial_mask = rearrange(input_mask, 'bs is sl no -> (bs sl) no is')
-            # spatial_mask = torch.einsum('bni,bmi->bnm', spatial_mask, spatial_mask).bool()
-            # spatial_mask = repeat(pra_A, 'b m n -> b new_axis m n', new_axis=enc_seq_len) # bs sl no no
             if self.interact_in_decoding:
                 # we only allow the message passing among the observed vehicles which at least have one valid position information (local_x, local_y).
                 dec_spatial_mask = rearrange(input_mask, 'bs is sl no -> bs no (sl is)') # (bs, no, sl)
@@ -329,10 +325,6 @@ class SpatialEncoderLayer(nn.Module):
         )
         spatial_attn_output = rearrange(spatial_attn_output, '(bs sl) no hs -> (bs no) sl hs', bs=batch_size)
 
-        # temporal_attn_output, enc_temporal_attn = self.temporal_attn(
-        #     spatial_attn_output, spatial_attn_output, spatial_attn_output, mask=slf_attn_mask
-        # )
-        # enc_output = self.pos_ffn(temporal_attn_output)
         enc_output = self.pos_ffn(spatial_attn_output)
         return enc_output, enc_slf_attn, enc_spaital_attn
 
@@ -593,16 +585,6 @@ class SpatialTransformer(nn.Module):
         trg_mask = None # get_pad_mask(trg_seq, self.trg_pad_idx) & get_subsequent_mask(trg_seq)
         dec_to_src_mask = None
         dec_spatial_mask = None
-        if type(input_mask) is not type(None):
-            pass
-            # input_mask: (bs, 1, sl, no)
-            # src_mask = rearrange(input_mask, 'bs is sl no -> (bs no) sl is') # (bs * no, sl, 1)
-            # src_mask = torch.einsum('bsi,bxi->bsx', src_mask, src_mask)
-            # src_mask = src_mask.bool()
-            # dec_to_src_mask = src_mask[:, :1, :].detach().clone()
-            # dec_spatial_mask = rearrange(input_mask[:, :, -1:, :], 'bs is sl no -> (bs sl) no is')
-            # dec_spatial_mask = torch.einsum('bni,byi->bny', dec_spatial_mask, dec_spatial_mask)
-            # dec_spatial_mask = dec_spatial_mask.bool()
 
         enc_output, *_ = self.encoder(pra_x, src_mask, batch_size) # enc_output: (bs * num_object, history_frames, hidden_size)
 
@@ -615,8 +597,7 @@ class SpatialTransformer(nn.Module):
             if type(pra_teacher_location) is not type(None) and np.random.random() < teacher_forcing_ratio and is_train:
                 velocity_locations[:, t+1: t+2, :] = pra_teacher_location[:, t: t+1]
             else:
-                # if type(dec_spatial_mask) is not type(None):
-                #     cur_dec_spatial_mask = dec_spatial_mask.repeat(t+1, 1, 1)
+                
                 dec_output, *_ = self.decoder(dec_input, trg_mask, enc_output, dec_to_src_mask, dec_spatial_mask=cur_dec_spatial_mask, batch_size=batch_size)
                 dec_output = self.trg_word_prj(dec_output) # (bs * num_object, t+1, out_size), out_size = 2, velocities of x and y.
 
