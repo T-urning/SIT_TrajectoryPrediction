@@ -21,7 +21,7 @@ from torch.nn import CrossEntropyLoss
 from feeder_ngsim import NgsimFeeder, NgsimFeederII, NgsimFeederIII
 from models import GRIP, TPHGI
 from layers.graph import HeteroGraph, Graph
-from utils import create_folders_if_not_exist
+from utils import create_folders_if_not_exist, seed_torch, save_ckpt, load_ckpt
 
 
 
@@ -50,58 +50,15 @@ parser.add_argument('--neighbor_distance', default=50, type=float, help="it's un
 parser.add_argument('--max_num_object', default=22, type=int)
 args = parser.parse_args()
 
-def seed_torch(seed=24):
 
-	random.seed(seed)
-	os.environ['PYTHONHASHSEED'] = str(seed)
-	np.random.seed(seed)
-	torch.manual_seed(seed)
-	torch.cuda.manual_seed(seed)
-	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
-	torch.backends.cudnn.benchmark = False
-	torch.backends.cudnn.deterministic = True
 
-def save_ckpt(state, checkpoint_dir, best_model_dir, is_best=False,  file_name='checkpoint.pt'):
-    r"""Usage:
-    >>> checkpoint = {
-    >>>     'epoch': epoch + 1,
-    >>>     'state_dict': model.state_dict(),
-    >>>     'optimizer': optimizer.state_dict()
-    >>> }
-    >>> save_ckpt(checkpoint, checkpoint_dir, best_model_dir, is_best)
-    """
-    f_path = os.path.join(checkpoint_dir, file_name)
-    torch.save(state, f_path)
-    if is_best:
-        best_f_path = os.path.join(best_model_dir, file_name)
-        shutil.copyfile(f_path, best_f_path)
-
-def load_ckpt(checkpoint_fpath, model, optimizer=None, lr_scheduler=None):
-    r"""Usage:
-    >>> model = MyModel(**kwargs)
-    >>> optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    >>> ckpt_path = "path/to/checkpoint/checkpoint.pt"
-    >>> model, optimizer, start_epoch = load_ckpt(ckpt_path, model, optimizer) 
-    """
-    checkpoint = torch.load(checkpoint_fpath)
-    model.load_state_dict(checkpoint['state_dict'])
-    epoch = checkpoint['epoch']
-    outputs = (model, epoch)
-    if optimizer:
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        outputs += (optimizer, )
-    if lr_scheduler:
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        outputs += (lr_scheduler, )
-
-    return outputs
 
 def data_loader(data_fpath, batch_size=128, shuffle=True, drop_last=False, train_val_test='train'):
 
     dataset = NgsimFeederIII(data_fpath, train_val_test=train_val_test, **args.__dict__)
-    dataset.length = 100000 # the length of val_dataset 12089
-    if train_val_test != 'train':
-        dataset.length = 10000
+    # dataset.length = 100000 # the length of val_dataset 12089
+    # if train_val_test != 'train':
+    #     dataset.length = 10000
     loader = torch.utils.data.DataLoader(
         dataset=dataset,
         batch_size=batch_size,
@@ -178,7 +135,7 @@ def val_model(model, data_loader, num_batch):
     all_overall_num_list = []
     n = 0
     with torch.no_grad():
-        for iteration, (ori_data, neighbor_matrices, _, _) in tqdm(enumerate(data_loader), total=num_batch):
+        for iteration, (ori_data, neighbor_matrices, _) in tqdm(enumerate(data_loader), total=num_batch):
             now_history_frames = args.t_h // args.down_sampling_steps + 1 # 30 // 2 + 1, 30: history frames, 2: down sampling steps
             data, no_norm_loc_data, _, A = preprocess_data(ori_data, rescale_xy, neighbor_matrices, observed_last=now_history_frames-1)
             
@@ -219,7 +176,7 @@ def test_model(model, data_loader, num_batch_test, mode='all'):
     all_overall_sum_list = []
     all_overall_num_list = []
     with torch.no_grad():
-        for iteration, (ori_data, neighbor_matrices, _, target_vehicle_ids) in tqdm(enumerate(data_loader), total=num_batch_test):
+        for iteration, (ori_data, neighbor_matrices, _) in tqdm(enumerate(data_loader), total=num_batch_test):
             now_history_frames = args.t_h // args.down_sampling_steps + 1 # 30 // 2 + 1, 30: history frames, 2: down sampling steps
             data, no_norm_loc_data, ori_vehicle_ids, A = preprocess_data(ori_data, rescale_xy, neighbor_matrices, observed_last=now_history_frames-1)
             input_data = data[:, :, :now_history_frames, :]
@@ -301,7 +258,7 @@ def run_train_val(model, train_data_path, dev_data_path, resume_training=False):
         rescale_xy[:, 0] = args.max_x
         rescale_xy[:, 1] = args.max_y
         class_criterion = CrossEntropyLoss(ignore_index=0) # we let 0 represent the unknown lane id
-        for iteration, (ori_data, neighbor_matrices, _, target_vehicle_ids) in enumerate(train_loader):
+        for iteration, (ori_data, neighbor_matrices, _) in enumerate(train_loader):
             # ori_data: (N, C, T, V), target_vehicle_ids: (N,)
             # C = 7 : [dataset_id, vehicle_id, frame_id local_x, local_y, lane_id] + [mark]
             now_history_frames = args.t_h // args.down_sampling_steps + 1 # 30 // 2 + 1, 30: history frames, 2: down sampling steps
@@ -412,7 +369,7 @@ if __name__ == '__main__':
     args.log_dir = log_dir
     args.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     
-    train_path = 'data/ValSet.mat' #TODO 仅用于测试
+    train_path = 'data/TrainSet.mat'
     dev_path = 'data/ValSet.mat'
     test_path = 'data/TestSet.mat'
 

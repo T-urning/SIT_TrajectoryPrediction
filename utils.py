@@ -1,5 +1,6 @@
 import os
-
+import random
+import shutil
 import scipy.io as scp
 import numpy as np
 import torch
@@ -12,6 +13,52 @@ def create_folders_if_not_exist(*folders):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
+def seed_torch(seed=24):
+
+	random.seed(seed)
+	os.environ['PYTHONHASHSEED'] = str(seed)
+	np.random.seed(seed)
+	torch.manual_seed(seed)
+	torch.cuda.manual_seed(seed)
+	torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+	torch.backends.cudnn.benchmark = False
+	torch.backends.cudnn.deterministic = True
+
+
+def save_ckpt(state, checkpoint_dir, best_model_dir, is_best=False,  file_name='checkpoint.pt'):
+    r"""Usage:
+    >>> checkpoint = {
+    >>>     'epoch': epoch + 1,
+    >>>     'state_dict': model.state_dict(),
+    >>>     'optimizer': optimizer.state_dict()
+    >>> }
+    >>> save_ckpt(checkpoint, checkpoint_dir, best_model_dir, is_best)
+    """
+    f_path = os.path.join(checkpoint_dir, file_name)
+    torch.save(state, f_path)
+    if is_best:
+        best_f_path = os.path.join(best_model_dir, file_name)
+        shutil.copyfile(f_path, best_f_path)
+
+def load_ckpt(checkpoint_fpath, model, optimizer=None, lr_scheduler=None):
+    r"""Usage:
+    >>> model = MyModel(**kwargs)
+    >>> optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    >>> ckpt_path = "path/to/checkpoint/checkpoint.pt"
+    >>> model, optimizer, start_epoch = load_ckpt(ckpt_path, model, optimizer) 
+    """
+    checkpoint = torch.load(checkpoint_fpath)
+    model.load_state_dict(checkpoint['state_dict'])
+    epoch = checkpoint['epoch']
+    outputs = (model, epoch)
+    if optimizer:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        outputs += (optimizer, )
+    if lr_scheduler:
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        outputs += (lr_scheduler, )
+
+    return outputs
 
 class NgsimDataset(Dataset):
     """

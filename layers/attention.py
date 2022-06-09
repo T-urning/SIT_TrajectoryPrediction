@@ -79,7 +79,7 @@ class MultiHeadAttentionNew(nn.Module):
         v = rearrange(self.w_vs(v), 'b t (head v) -> head b t v', head=self.n_head)
         attn = torch.einsum('hblk,hbtk->hblt', [q, k]) / np.sqrt(q.shape[-1])
         if mask is not None:
-            attn = attn.masked_fill(mask[None], -np.inf)
+            attn = attn.masked_fill(mask[None] == 0, -1e9)
             
         attn = torch.softmax(attn, dim=3)
         output = torch.einsum('hblt,hbtv->hblv', [attn, v])

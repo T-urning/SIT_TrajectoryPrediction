@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from einops import rearrange
+from einops import rearrange, repeat
 from layers.graph import Graph
 from layers.attention import TiedLinear, MultiHeadAttention, PositionwiseFeedForward, MultiHeadAttentionNew, EncoderLayer, DecoderLayer
 from layers.graph_conv_block import Graph_Conv_Block
@@ -115,13 +115,6 @@ class TPHGI(nn.Module):
         if self.predict_lane:
             lane_id_predict = self.lane_predictor(lane_id_logits) # (N*V, T, 10)
 
-        # now_predict_human = self.seq2seq_human(in_data=graph_conv_feature, last_location=last_position[:,-1:,:], pred_length=pra_pred_length, teacher_forcing_ratio=pra_teacher_forcing_ratio, teacher_location=pra_teacher_location)
-        # now_predict_human = self.reshape_from_lstm(now_predict_human) # (N, C, T, V)
-
-        # now_predict_bike = self.seq2seq_bike(in_data=graph_conv_feature, last_location=last_position[:,-1:,:], pred_length=pra_pred_length, teacher_forcing_ratio=pra_teacher_forcing_ratio, teacher_location=pra_teacher_location)
-        # now_predict_bike = self.reshape_from_lstm(now_predict_bike) # (N, C, T, V)
-
-
         return now_predict, lane_id_predict
 
 class GRIP(nn.Module):
@@ -160,10 +153,6 @@ class GRIP(nn.Module):
             self.seq2seq = Seq2Seq(self.seq2seq_type, input_size=(64), hidden_size=2, num_layers=2, dropout=0.5)
         else:
             self.seq2seq = TransformerSeq2Seq()
-
-        # self.seq2seq_human = Seq2Seq(input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
-        # self.seq2seq_bike = Seq2Seq(input_size=(64), hidden_size=out_dim_per_node, num_layers=2, dropout=0.5, isCuda=True)
-
 
     def reshape_for_lstm(self, feature):
         # prepare for skeleton prediction model
@@ -205,14 +194,6 @@ class GRIP(nn.Module):
         # now_predict.shape = (N, T, V*C)
         now_predict, _ = self.seq2seq(in_data=graph_conv_feature, last_location=last_position[:,-1:,:], pred_length=pra_pred_length, teacher_forcing_ratio=pra_teacher_forcing_ratio, teacher_location=pra_teacher_location)
         now_predict = self.reshape_from_lstm(now_predict) # (N, C, T, V)
-
-        # now_predict_human = self.seq2seq_human(in_data=graph_conv_feature, last_location=last_position[:,-1:,:], pred_length=pra_pred_length, teacher_forcing_ratio=pra_teacher_forcing_ratio, teacher_location=pra_teacher_location)
-        # now_predict_human = self.reshape_from_lstm(now_predict_human) # (N, C, T, V)
-
-        # now_predict_bike = self.seq2seq_bike(in_data=graph_conv_feature, last_location=last_position[:,-1:,:], pred_length=pra_pred_length, teacher_forcing_ratio=pra_teacher_forcing_ratio, teacher_location=pra_teacher_location)
-        # now_predict_bike = self.reshape_from_lstm(now_predict_bike) # (N, C, T, V)
-
-
         return now_predict, None
 
 class SpatialTransformerRNN(nn.Module):
@@ -220,33 +201,31 @@ class SpatialTransformerRNN(nn.Module):
 
     def __init__(
             self, in_size, out_size, d_model=128, d_inner=512,
-            n_layers=2, n_head=4, d_k=32, d_v=32, dropout=0.1, n_position=25,
-            emb_src_trg_weight_sharing=False, **kwargs):
+            n_layers=2, n_head=4, d_k=32, d_v=32, dropout=0.1, n_position=16, spatial_interact=True,**kwargs):
 
         super().__init__()
 
-        # In section 3.4 of paper "Attention Is All You Need", there is such detail:
-        # "In our model, we share the same weight matrix between the two
-        # embedding layers and the pre-softmax linear transformation...
-        # In the embedding layers, we multiply those weights by \sqrt{d_model}".
-        #
-        # Options here:
-        #   'emb': multiply \sqrt{d_model} to embedding output
-        #   'prj': multiply (\sqrt{d_model} ^ -1) to linear projection output
-        #   'none': no multiplication
-
         self.d_model = d_model
-        self.transformer_encoder = SpatialEncoder(
+        transformer_encoder = Encoder
+        if spatial_interact:
+            transformer_encoder = SpatialEncoder
+        self.transformer_encoder = transformer_encoder(
             in_size=in_size, n_position=n_position,
             d_model=d_model, d_inner=d_inner,
             n_layers=n_layers, n_head=n_head, d_k=d_k, d_v=d_v,
             dropout=dropout, scale_emb=False)
         self.out_size = out_size # 2
         self.seq2seq_type = kwargs.get('seq2seq_type', 'gru')
-        
+        self.interact_in_decoding = kwargs.get('interact_in_decoding', False)
+        self.tanh = nn.Tanh()
+        self.dropout = nn.Dropout(p=0.5)
         self.rnn_encoder = EncoderRNN(self.seq2seq_type, input_size=d_model, hidden_size=out_size, num_layers=2)
-        self.rnn_decoder = DecoderRNN(self.seq2seq_type, hidden_size=out_size, output_size=out_size, num_layers=2, dropout=dropout)
-        
+        self.rnn_decoder = DecoderRNN(self.seq2seq_type, hidden_size=out_size, output_size=out_size, num_layers=2, dropout=0.5)
+        if self.interact_in_decoding:
+            d_model = 2 * 60
+            d_k = d_v = d_model // n_head
+            self.layer_norm = nn.LayerNorm(60)
+            self.attention_interact = MultiHeadAttentionNew(n_head=n_head, d_model=d_model, d_k=d_k, d_v=d_v, dropout=dropout)
         # self.decoder = DecoderRNN(type='gru', num_layers=n_layers, output_size=out_size, hidden_size=d_model//n_layers, dropout=dropout)
 
         for p in self.parameters():
@@ -254,7 +233,7 @@ class SpatialTransformerRNN(nn.Module):
                 nn.init.xavier_uniform_(p)
 
 
-    def forward(self, pra_x, pra_pred_length, input_mask=None, teacher_forcing_ratio=0.0, pra_teacher_location=None, is_train=True, **kwargs):
+    def forward(self, pra_x, pra_A, pra_pred_length, input_mask=None, teacher_forcing_ratio=0.0, pra_teacher_location=None, is_train=True, **kwargs):
 
         batch_size, in_size, enc_seq_len, num_object = pra_x.size()
         pra_x = rearrange(pra_x, 'bs is sl no -> (bs no) sl is')
@@ -266,19 +245,26 @@ class SpatialTransformerRNN(nn.Module):
         velocity_locations = torch.zeros((batch_size*num_object, pra_pred_length, self.out_size), device=pra_x.device)
 
         src_mask = None # get_pad_mask(src_seq, self.src_pad_idx)
-
+        spatial_mask = rearrange(pra_A, 'b l m n -> (b l) m n').bool() # (bs * sl, no, no)
+        dec_spatial_mask = None
         if type(input_mask) is not type(None):
-            pass
+            
             # input_mask: (bs, 1, sl, no)
-            # src_mask = rearrange(input_mask, 'bs is sl no -> (bs no) sl is') # (bs * no, sl, 1)
-            # src_mask = torch.einsum('bsi,bxi->bsx', src_mask, src_mask)
-            # src_mask = src_mask.bool()
-            # dec_to_src_mask = src_mask[:, :1, :].detach().clone()
-            # dec_spatial_mask = rearrange(input_mask[:, :, -1:, :], 'bs is sl no -> (bs sl) no is')
-            # dec_spatial_mask = torch.einsum('bni,byi->bny', dec_spatial_mask, dec_spatial_mask)
-            # dec_spatial_mask = dec_spatial_mask.bool()
-
-        transformer_output, *_ = self.transformer_encoder(pra_x, src_mask, batch_size=batch_size) # enc_output: (bs * num_object, history_frames, hidden_size)
+            src_mask = rearrange(input_mask, 'bs is sl no -> (bs no) sl is') # (bs * no, sl, 1)
+            subsequent_mask = get_subsequent_mask(src_mask.squeeze(-1))
+            src_mask = torch.einsum('bsi,bxi->bsx', src_mask, src_mask)
+            src_mask = (subsequent_mask * src_mask).bool()
+            
+            # spatial_mask = rearrange(input_mask, 'bs is sl no -> (bs sl) no is')
+            # spatial_mask = torch.einsum('bni,bmi->bnm', spatial_mask, spatial_mask).bool()
+            # spatial_mask = repeat(pra_A, 'b m n -> b new_axis m n', new_axis=enc_seq_len) # bs sl no no
+            if self.interact_in_decoding:
+                # we only allow the message passing among the observed vehicles which at least have one valid position information (local_x, local_y).
+                dec_spatial_mask = rearrange(input_mask, 'bs is sl no -> bs no (sl is)') # (bs, no, sl)
+                dec_spatial_mask = dec_spatial_mask.sum(axis=-1, keepdim=True) # (bs, no, 1)
+                dec_spatial_mask = torch.einsum('boi,bui->bou', dec_spatial_mask, dec_spatial_mask).bool() # (batch_size, num_object, num_object)
+        
+        transformer_output, *_ = self.transformer_encoder(pra_x, src_mask, spatial_mask=spatial_mask, batch_size=batch_size) # enc_output: (bs * num_object, history_frames, hidden_size)
         last_position_velocity = pra_x[:, -1:, :2]
 
         encoded_output, hidden = self.rnn_encoder(transformer_output)
@@ -291,12 +277,22 @@ class SpatialTransformerRNN(nn.Module):
             teacher_force = np.random.random() < teacher_forcing_ratio
             last_position_velocity = (pra_teacher_location[:,t:t+1] if (type(pra_teacher_location) is not type(None)) and teacher_force else now_out)
             dec_input = last_position_velocity
+            if self.interact_in_decoding:
+                hidden = self.message_passing(hidden, mask=dec_spatial_mask, batch_size=batch_size)
 
         
         outputs = rearrange(velocity_locations, '(bs no) sl hs -> bs hs sl no', bs=batch_size)
 
         return outputs, None
 
+    def message_passing(self, hidden, batch_size, mask=None):
+        # hidden: (num_layers, batch_size * num_object, hidden_size)
+        shaped_hidden = rearrange(hidden, 'nl (b o) hs -> b o (nl hs)', b=batch_size) # (batch_size, num_object, num_layers * hidden_size)
+        interacted_hidden,  _ = self.attention_interact(shaped_hidden, shaped_hidden, shaped_hidden, mask=mask)
+        interacted_hidden = rearrange(interacted_hidden, 'b o (nl hs) -> nl (b o) hs', nl=self.rnn_decoder.num_layers).contiguous()
+        interacted_hidden = self.dropout(interacted_hidden)
+        hidden = self.layer_norm(hidden + interacted_hidden)
+        return hidden
 
 def get_pad_mask(seq, pad_idx):
     return (seq != pad_idx).unsqueeze(-2)
@@ -315,6 +311,7 @@ class SpatialEncoderLayer(nn.Module):
         super(SpatialEncoderLayer, self).__init__()
         self.slf_attn = MultiHeadAttentionNew(n_head, d_model, d_k, d_v, dropout=dropout)
         self.spatial_attn = MultiHeadAttentionNew(n_head, d_model, d_k, d_v, dropout=dropout)
+        # self.temporal_attn = MultiHeadAttentionNew(n_head, d_model, d_k, d_v, dropout=dropout)
         self.pos_ffn = PositionwiseFeedForward(d_model, d_inner, dropout=dropout)
 
     def forward(self, enc_input, batch_size, slf_attn_mask=None, spatial_attn_mask=None):
@@ -331,6 +328,11 @@ class SpatialEncoderLayer(nn.Module):
             spatial_attn_input, spatial_attn_input, spatial_attn_input, mask=spatial_attn_mask
         )
         spatial_attn_output = rearrange(spatial_attn_output, '(bs sl) no hs -> (bs no) sl hs', bs=batch_size)
+
+        # temporal_attn_output, enc_temporal_attn = self.temporal_attn(
+        #     spatial_attn_output, spatial_attn_output, spatial_attn_output, mask=slf_attn_mask
+        # )
+        # enc_output = self.pos_ffn(temporal_attn_output)
         enc_output = self.pos_ffn(spatial_attn_output)
         return enc_output, enc_slf_attn, enc_spaital_attn
 
@@ -417,7 +419,7 @@ class Encoder(nn.Module):
         self.scale_emb = scale_emb
         self.d_model = d_model
 
-    def forward(self, src_seq, src_mask, batch_size, return_attns=False):
+    def forward(self, src_seq, src_mask, batch_size, return_attns=False, **kwargs):
 
         enc_slf_attn_list = []
 
@@ -457,7 +459,7 @@ class SpatialEncoder(nn.Module):
         self.scale_emb = scale_emb
         self.d_model = d_model
 
-    def forward(self, src_seq, src_mask, batch_size, return_attns=False):
+    def forward(self, src_seq, src_mask, spatial_mask, batch_size, return_attns=False, **kwargs):
 
         enc_slf_attn_list, enc_spatial_list = [], []
 
@@ -470,7 +472,10 @@ class SpatialEncoder(nn.Module):
         enc_output = self.layer_norm(enc_output)
 
         for enc_layer in self.layer_stack:
-            enc_output, enc_slf_attn, enc_spatial_attn = enc_layer(enc_output, batch_size=batch_size, slf_attn_mask=src_mask)
+            enc_output, enc_slf_attn, enc_spatial_attn = enc_layer(
+                enc_output, batch_size=batch_size, 
+                slf_attn_mask=src_mask, spatial_attn_mask=spatial_mask
+            )
             enc_slf_attn_list += [enc_slf_attn] if return_attns else []
             enc_spatial_list += [enc_spatial_attn] if return_attns else []
 

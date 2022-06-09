@@ -99,19 +99,21 @@ class NgsimFeederIII(Dataset):
         dset_id, veh_id, cur_frame_id = self.traj[index, :3].astype(int).tolist()
         neighbor_grid = self.traj[index, 8:]
         object_frame_feature = np.zeros((self.max_num_object, self.total_frames // 2 + 1, 7)) # (V, T, C), T = 41 = 16 (history) + 25 (future)
-        neighbor_matrix = np.zeros((self.max_num_object, self.max_num_object))
+        
 
         object_frame_feature, valid_vehicle_num, mean_xy = self._process_data(
             cur_frame_id, veh_id, dset_id, neighbor_grid, object_frame_feature
         ) # object_frame_feature: (V, T, C)
-        
-        visible_object_value = object_frame_feature[:, self.max_len_history-1, :]
-        for i in range(valid_vehicle_num):
-            for j in range(i+1):
-                longitu_i, lane_i = visible_object_value[i][4:6]
-                longitu_j, lane_j = visible_object_value[j][4:6]
-                if abs(longitu_i - longitu_j) < self.neighbor_distance and abs(lane_i - lane_j) < 2.0:
-                    neighbor_matrix[i][j] = neighbor_matrix[j][i] = 1
+    
+        neighbor_matrix = np.zeros((self.max_len_history, self.max_num_object, self.max_num_object), dtype=np.int8)
+        for cur_step in range(self.max_len_history):
+            visible_object_value = object_frame_feature[:, cur_step, :]
+            for i in range(valid_vehicle_num):
+                for j in range(i+1):
+                    longitu_i, lane_i = visible_object_value[i][4:6]
+                    longitu_j, lane_j = visible_object_value[j][4:6]
+                    if abs(longitu_i - longitu_j) < self.neighbor_distance and abs(lane_i - lane_j) < 2.0:
+                        neighbor_matrix[cur_step, i, j] = neighbor_matrix[cur_step, j, i] = 1
 
         if self.use_hetero_graph:
             if self.num_hetero_types == 3:
@@ -120,6 +122,7 @@ class NgsimFeederIII(Dataset):
                 neighbor_matrix = self._fill_hetero_type_more(neighbor_matrix, visible_object_value)
             else:
                 raise ValueError('Valid value of num_hetero_types, which should be 3 or 6.')
+        
         object_frame_feature = object_frame_feature.transpose(2, 1, 0) # (C, T, V)
         # data aumentation
         if self.train_val_test == 'train' and np.random.random() < self.data_aug_ratio:
@@ -144,8 +147,9 @@ class NgsimFeederIII(Dataset):
         # adjacency_maxtrix = self.graph.get_adjacency(neighbor_matrix)
         # A = self.graph.normalize_adjacency(adjacency_maxtrix)
 
-
-        return object_frame_feature, neighbor_matrix, mean_xy, veh_id
+        
+        return object_frame_feature, neighbor_matrix, mean_xy, valid_vehicle_num
+        
 
     def _process_data(self, cur_frame_id, veh_id, dset_id, neighbor_grid, object_frame_feature):
         # object_frame_feature: shape of (V, T, C)
@@ -713,7 +717,7 @@ if __name__ == '__main__':
 
         return data, ori_data
 
-    mat_fpath = 'data/TrainSet.mat'
+    mat_fpath = 'data/TestSet.mat'
     dataset = NgsimFeederIII(mat_fpath, train_val_test='val', max_num_object=22, **{'graph_args': {'max_hop': 2, 'num_node': 22, 'num_hetero_types': 3}})
     print(dataset.length)
     # dataset.length = 10000
@@ -721,7 +725,7 @@ if __name__ == '__main__':
     loader = torch.utils.data.DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         drop_last=False,
         num_workers=4
     )
